@@ -2,7 +2,7 @@
 
 Serves this folder and adds GET /api/photos?count=N, which fetches random
 Unsplash photos server-side so the access key never reaches the browser.
-It mirrors Matt's /api/photos route (same query pool, same utm credit links)
+It uses Matt's query pool and utm credit links (two queries per batch)
 and stands in for the Vercel function the iOS app will use.
 
 Run:  python3 server.py   then open http://localhost:8642
@@ -51,19 +51,17 @@ def with_utm(url):
     return f"{url}{'&' if '?' in url else '?'}{UTM}"
 
 
-def fetch_one(query, key):
-    url = "https://api.unsplash.com/photos/random?orientation=landscape&query=" + urllib.parse.quote(query)
+def fetch_batch(query, count, key):
+    """One request, several photos for one query (2 requests per batch of 10)."""
+    url = (f"https://api.unsplash.com/photos/random?orientation=landscape&count={count}&query="
+           + urllib.parse.quote(query))
     req = urllib.request.Request(url, headers={"Authorization": f"Client-ID {key}", "Accept-Version": "v1"})
     try:
         with urllib.request.urlopen(req, timeout=10) as res:
-            p = json.load(res)
+            data = json.load(res)
     except (urllib.error.URLError, TimeoutError, json.JSONDecodeError):
-        return None
-    if isinstance(p, list):
-        p = p[0] if p else None
-    if not p:
-        return None
-    return {
+        return []
+    return [{
         "id": p["id"],
         "url": p["urls"]["regular"],
         "color": p.get("color") or "#888888",
@@ -71,7 +69,7 @@ def fetch_one(query, key):
         "photographerUrl": with_utm(p["user"]["links"]["html"]),
         "photoUrl": with_utm(p["links"]["html"]),
         "alt": p.get("alt_description") or "Unsplash photo",
-    }
+    } for p in (data if isinstance(data, list) else [data])]
 
 
 class Handler(SimpleHTTPRequestHandler):
@@ -87,9 +85,12 @@ class Handler(SimpleHTTPRequestHandler):
             return self.send_json(500, {"error": "UNSPLASH_ACCESS_KEY is missing (prototype/.env)"})
         params = urllib.parse.parse_qs(parsed.query)
         count = max(1, min(30, int(params.get("count", ["10"])[0] or 10)))
-        queries = random.sample(QUERIES, count)
-        with ThreadPoolExecutor(max_workers=6) as pool:
-            photos = [p for p in pool.map(lambda q: fetch_one(q, key), queries) if p]
+        q1, q2 = random.sample(QUERIES, 2)
+        half = (count + 1) // 2
+        with ThreadPoolExecutor(max_workers=2) as pool:
+            batches = list(pool.map(lambda a: fetch_batch(a[0], a[1], key), [(q1, half)] + ([(q2, count - half)] if count > half else [])))
+        # Interleave the two queries so neighbouring photos differ.
+        photos = [b[i] for i in range(half) for b in batches if i < len(b)]
         if not photos:
             return self.send_json(502, {"error": "No photos returned (rate limit or network)"})
         self.send_json(200, photos)
