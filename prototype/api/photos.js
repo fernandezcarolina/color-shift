@@ -40,7 +40,23 @@ async function fetchBatch(query, count, key) {
   }
 }
 
+// Other sites may only call this from the Color Shift React Native web build
+// (and local development), so strangers can't spend the Unsplash quota.
+// The native iPhone app sends no Origin header and isn't affected.
+const ALLOWED_ORIGINS = [
+  'https://color-shift-native.vercel.app',
+  'http://localhost:8081',
+  'http://127.0.0.1:8650',
+];
+
 export default async function handler(req, res) {
+  const origin = req.headers.origin;
+  if (origin && ALLOWED_ORIGINS.includes(origin)) {
+    res.setHeader('Access-Control-Allow-Origin', origin);
+    res.setHeader('Vary', 'Origin');
+  }
+  if (req.method === 'OPTIONS') return res.status(204).end();
+
   const key = process.env.UNSPLASH_ACCESS_KEY;
   res.setHeader('Cache-Control', 'no-store');
   if (!key) return res.status(500).json({ error: 'UNSPLASH_ACCESS_KEY is not set' });
